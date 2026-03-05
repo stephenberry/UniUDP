@@ -104,6 +104,11 @@ impl std::error::Error for SendFailure {
     }
 }
 
+/// Converts to the underlying [`UniUdpError`], discarding send-specific
+/// context ([`SendFailure::key`], [`SendFailure::packets_sent`]).
+///
+/// If you need to know whether packets were partially sent, match on
+/// [`SendFailure`] directly instead of using `?` into a `UniUdpError`.
 impl From<SendFailure> for UniUdpError {
     fn from(value: SendFailure) -> Self {
         value.into_error()
