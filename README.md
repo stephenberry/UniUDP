@@ -44,7 +44,7 @@ For async/Tokio support:
 
 ```toml
 [dependencies]
-uniudp = { version = "0.1", features = ["tokio"] }
+uniudp = { version = "1", features = ["tokio"] }
 tokio = { version = "1", features = ["macros", "rt", "net"] }
 ```
 
