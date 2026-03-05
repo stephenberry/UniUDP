@@ -181,7 +181,8 @@ impl Sender {
         )
     }
 
-    pub fn try_with_identity_and_limits(
+    #[cfg(test)]
+    fn try_with_identity_and_limits(
         sender_id: SenderId,
         session_nonce: u64,
         max_tracked_senders: usize,
