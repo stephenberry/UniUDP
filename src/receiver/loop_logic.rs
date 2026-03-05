@@ -217,8 +217,11 @@ impl Receiver {
 
     /// Receives one message from `socket`.
     ///
-    /// This call requires exclusive ownership of the socket for the full
-    /// receive duration.
+    /// Takes `&mut UdpSocket` because the implementation temporarily changes
+    /// the socket's read timeout and restores it on return. The `&mut`
+    /// prevents concurrent access that could interfere with the
+    /// save/restore cycle. (The async variant uses `tokio::time::timeout`
+    /// instead, so it only needs `&`.)
     ///
     /// Blocking sockets are preferred. Nonblocking sockets are also supported:
     /// `WouldBlock` is treated as no-data-yet and waits on socket readiness
@@ -242,8 +245,8 @@ impl Receiver {
     /// Repeatedly receives messages from `socket` and invokes `on_message` for
     /// each completed report.
     ///
-    /// This call requires exclusive ownership of the socket for the full
-    /// receive duration.
+    /// Takes `&mut UdpSocket` for the same reason as [`Receiver::receive_message`]:
+    /// the read timeout is temporarily modified during the call.
     ///
     /// Per-message timeout budgets come from `options` on each iteration.
     /// Keyed filtering (`ReceiveOptions::with_key`) is not supported here;

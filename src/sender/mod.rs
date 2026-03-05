@@ -104,6 +104,11 @@ impl std::error::Error for SendFailure {
     }
 }
 
+/// Converts to the underlying [`UniUdpError`], discarding send-specific
+/// context ([`SendFailure::key`], [`SendFailure::packets_sent`]).
+///
+/// If you need to know whether packets were partially sent, match on
+/// [`SendFailure`] directly instead of using `?` into a `UniUdpError`.
 impl From<SendFailure> for UniUdpError {
     fn from(value: SendFailure) -> Self {
         value.into_error()
@@ -176,7 +181,8 @@ impl Sender {
         )
     }
 
-    pub fn try_with_identity_and_limits(
+    #[cfg(test)]
+    fn try_with_identity_and_limits(
         sender_id: SenderId,
         session_nonce: u64,
         max_tracked_senders: usize,

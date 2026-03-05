@@ -152,11 +152,11 @@ The `Sender` tracks the highest `message_id` per `(sender_id, session_nonce)` pa
 use uniudp::sender::Sender;
 
 // Increase capacity for multi-identity workloads
-let sender = Sender::try_with_identity_and_limits(
-    sender_id,
-    session_nonce,
-    8192, // max tracked identities
-)?;
+let sender = Sender::builder()
+    .with_sender_id(sender_id)
+    .with_session_nonce(session_nonce)
+    .with_max_tracked_senders(8192)
+    .build()?;
 ```
 
 ## Message ID Allocation
