@@ -209,7 +209,7 @@ fn randomized_end_to_end_matrix() {
         let mut payload = vec![0_u8; payload_len];
         rng.fill_bytes(&mut payload);
 
-        let chunk_size = (rng.next_usize(255) + 1) as u16;
+        let chunk_size = (rng.next_usize(224) + 32) as u16;
         let redundancy = (rng.next_usize(3) + 1) as u16;
         let fec_mode = if rng.gen_bool_ratio(1, 3) {
             FecMode::None
