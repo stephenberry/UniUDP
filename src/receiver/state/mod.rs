@@ -57,10 +57,7 @@ impl ReceiverState {
     }
 
     pub(super) fn cleanup(&mut self, now: Instant, config: &ReceiverRuntimeConfig) {
-        loop {
-            let Some((completed_at, key)) = self.completed_index.oldest() else {
-                break;
-            };
+        while let Some((completed_at, key)) = self.completed_index.oldest() {
             let stale = !self.completed.contains_key(&key);
             if !stale && now.duration_since(completed_at) <= config.dedup_window() {
                 break;
@@ -68,10 +65,7 @@ impl ReceiverState {
             self.remove_completed(&key);
         }
         self.enforce_completed_capacity(config);
-        loop {
-            let Some((created_at, key)) = self.pending_index.oldest() else {
-                break;
-            };
+        while let Some((created_at, key)) = self.pending_index.oldest() {
             if now.duration_since(created_at) <= config.pending_max_age() {
                 break;
             }
