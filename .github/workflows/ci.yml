@@ -25,6 +25,18 @@ jobs:
       - run: cargo build --all-features
       - run: cargo test --all-features
 
+  # Pinned to the rust-version declared in Cargo.toml. Bump both together.
+  msrv:
+    name: MSRV (1.96)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96"
+      - run: cargo build --all-features
+      - run: cargo test --all-features
+
   clippy:
     name: Clippy (${{ matrix.rust }})
     runs-on: ubuntu-latest
