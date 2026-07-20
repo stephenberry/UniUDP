@@ -1,7 +1,8 @@
+use std::hint::black_box;
 use std::net::UdpSocket;
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use uniudp::auth::{PacketAuth, PacketAuthKey};
 use uniudp::fec::{pack_fec_field, pack_rs_data_field, pack_rs_parity_field, FecMode};
 use uniudp::message::{MessageKey, SenderId};
