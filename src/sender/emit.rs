@@ -56,9 +56,10 @@ impl SendScratch {
                     buf.resize(plan.chunk_size, 0_u8);
                 }
                 // Cache the RS encoder so it is not rebuilt per parity group.
-                let needs_rebuild = self.rs_encoder.as_ref().map_or(true, |e| {
-                    e.data_shard_count() != ds || e.parity_shard_count() != ps
-                });
+                let needs_rebuild = self
+                    .rs_encoder
+                    .as_ref()
+                    .is_none_or(|e| e.data_shard_count() != ds || e.parity_shard_count() != ps);
                 if needs_rebuild {
                     self.rs_encoder = reed_solomon_erasure::galois_8::ReedSolomon::new(ds, ps).ok();
                 }
