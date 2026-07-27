@@ -5,6 +5,7 @@ use std::time::Instant;
 use crate::types::{MessageKey, PacketHeader, ReceiverRuntimeConfig, SenderId, SourcePolicy};
 
 use super::message_state::{MessageState, PacketUpdateOutcome};
+use super::rs_shared::RsShared;
 use super::session::SenderSessionState;
 
 mod completed_cache;
@@ -41,6 +42,11 @@ pub(super) struct ReceiverState {
     completion_index: SequenceKeyIndex,
     sender_sessions: HashMap<SenderId, HashMap<u64, SenderSessionState>>,
     tracked_sessions: usize,
+    /// Reed-Solomon codecs and decode scratch, shared by every pending message.
+    /// A codec depends only on the shard split, and reconstruction only reads
+    /// it, so building one per message repeated `O(data_shards^2)` work for
+    /// every message a sender sent with the same parameters.
+    rs: RsShared,
 }
 
 impl ReceiverState {
@@ -53,6 +59,7 @@ impl ReceiverState {
         self.completion_index.clear();
         self.sender_sessions.clear();
         self.tracked_sessions = 0;
+        self.rs.clear();
         self.assert_index_invariants();
     }
 
@@ -105,7 +112,7 @@ impl ReceiverState {
             if !policy.allows_existing(state.first_source, source) {
                 return UpsertOutcome::RejectedSourcePolicy;
             }
-            match state.update(header, payload) {
+            match state.update(header, payload, &mut self.rs) {
                 PacketUpdateOutcome::Accepted => {
                     state.last_activity_at = Instant::now();
                     updated_existing = true;
@@ -128,7 +135,8 @@ impl ReceiverState {
             return UpsertOutcome::RejectedSourcePolicy;
         }
 
-        let Ok(state) = MessageState::new(header, payload, key, source, config) else {
+        let Ok(state) = MessageState::new(header, payload, key, source, config, &mut self.rs)
+        else {
             return UpsertOutcome::RejectedMessageMetadata;
         };
         let incoming_message_bytes = Self::pending_cost(&state);

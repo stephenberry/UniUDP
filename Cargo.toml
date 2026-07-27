@@ -25,7 +25,7 @@ crc32c = "0.6.8"
 hmac = "0.13"
 mio = { version = "1.2", features = ["os-poll", "os-ext"] }
 rand = "0.10"
-reed-solomon-erasure = "6"
+reed-solomon-engine = "0.2"
 sha2 = "0.11"
 subtle = "2"
 tokio = { version = "1", features = ["net", "time", "rt", "macros"], optional = true }
@@ -33,7 +33,7 @@ zeroize = "1"
 
 [dev-dependencies]
 criterion = "0.8"
-reed-solomon-erasure = "6"
+reed-solomon-engine = "0.2"
 
 [[bench]]
 name = "performance"

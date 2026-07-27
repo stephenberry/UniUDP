@@ -99,6 +99,14 @@ RS parity: 0x8000 | ((data_shards-1) << 1) | ((parity_shards-1) << 7) | (parity_
 
 RS mode can recover up to `parity_shards` missing data chunks per group.
 
+#### Parity construction
+
+Writing `k` for `data_shards`, `m` for `parity_shards`, and `n = k + m`, parity is computed byte-wise over GF(2^8) with reduction polynomial `0x11D` using the systematic Vandermonde generator matrix: form `V[r][c] = r^c` for `r` in `0..n` and `c` in `0..k` (with the convention `0^0 = 1`), then right-multiply by the inverse of its top `k × k` block so that data shards pass through unchanged. Parity shard `j` is then the XOR of every data shard `c` scaled by the coefficient `P[j][c]`. Shard indices `0..k` are the data shards in order and `k..n` are the parity shards in order.
+
+This is the de facto interchange format for byte-wise Reed-Solomon erasure coding, so parity bytes are stable across UniUDP versions and interoperable with other implementations of the same construction. A change to any of it is a protocol break; `rs_parity_wire_format_is_stable` in `tests/protocol/fec.rs` pins the coefficients against hardcoded vectors so such a change fails loudly.
+
+A partial final group is padded with implicit all-zero data shards, which the sender encodes over and the receiver reconstructs against; the padding is never transmitted.
+
 #### Helper functions
 
 ```rust

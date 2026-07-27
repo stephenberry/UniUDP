@@ -110,8 +110,11 @@ fn pending_byte_budget_evicts_oldest_partial_message() {
         sender.send_to(&packet, destination).unwrap();
     }
 
+    // Calibrated to the per-message pending footprint (~2.5 KiB for a 2-chunk,
+    // 2048-byte message): room for two pending messages but not three, so the
+    // third arrival must evict the oldest.
     let mut receiver = Receiver::try_with_config(receiver_config! {
-        max_pending_bytes: 9000,
+        max_pending_bytes: 6000,
         ..ReceiverConfig::default()
     })
     .unwrap();
@@ -222,8 +225,11 @@ fn oversized_pending_message_is_dropped_without_evicting_fit_message() {
     .unwrap();
     sender.send_to(&oversized_packet, destination).unwrap();
 
+    // Calibrated to the per-message pending footprint so that the 2-chunk
+    // message fits (~2.5 KiB) while the 3-chunk one (~3.6 KiB) does not fit even
+    // on its own, and so is dropped rather than evicting the message that fits.
     let mut receiver = Receiver::try_with_config(receiver_config! {
-        max_pending_bytes: 4500,
+        max_pending_bytes: 3000,
         ..ReceiverConfig::default()
     })
     .unwrap();
