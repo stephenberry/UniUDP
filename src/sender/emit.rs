@@ -25,7 +25,7 @@ pub struct SendScratch {
     packet_buffer: Vec<u8>,
     rs_data_buffers: Vec<Vec<u8>>,
     rs_parity_buffers: Vec<Vec<u8>>,
-    rs_encoder: Option<reed_solomon_erasure::galois_8::ReedSolomon>,
+    rs_encoder: Option<reed_solomon_engine::Encoder>,
 }
 
 impl SendScratch {
@@ -59,9 +59,9 @@ impl SendScratch {
                 let needs_rebuild = self
                     .rs_encoder
                     .as_ref()
-                    .is_none_or(|e| e.data_shard_count() != ds || e.parity_shard_count() != ps);
+                    .is_none_or(|e| e.data_shards() != ds || e.parity_shards() != ps);
                 if needs_rebuild {
-                    self.rs_encoder = reed_solomon_erasure::galois_8::ReedSolomon::new(ds, ps).ok();
+                    self.rs_encoder = reed_solomon_engine::Encoder::new(ds, ps).ok();
                 }
             }
         }
@@ -394,7 +394,7 @@ fn build_parity_header(ctx: &ParityContext, group_start: usize, fec_field: u16) 
 struct RsScratchRef<'a> {
     data_buffers: &'a mut [Vec<u8>],
     parity_buffers: &'a mut [Vec<u8>],
-    encoder: &'a reed_solomon_erasure::galois_8::ReedSolomon,
+    encoder: &'a reed_solomon_engine::Encoder,
 }
 
 fn buffer_rs_data_shard(
@@ -443,7 +443,7 @@ fn encode_and_emit_rs_parity(
         .map(|b| &mut b[..chunk_size])
         .collect();
     rs.encoder
-        .encode_sep(&data_refs, &mut parity_refs)
+        .encode(&data_refs, &mut parity_refs)
         .map_err(|_| UniUdpError::encode(EncodeContext::Packet, "RS encoding failed"))?;
 
     // Emit parity packets
@@ -520,7 +520,7 @@ async fn encode_and_emit_rs_parity_async(
         .map(|b| &mut b[..chunk_size])
         .collect();
     rs.encoder
-        .encode_sep(&data_refs, &mut parity_refs)
+        .encode(&data_refs, &mut parity_refs)
         .map_err(|_| UniUdpError::encode(EncodeContext::Packet, "RS encoding failed"))?;
 
     let group_start = chunk_idx - group_offset;

@@ -11,19 +11,6 @@ use crate::types::{
     CompletionReason, MessageChunk, MessageKey, MessageReport, PacketHeader, ReceiverRuntimeConfig,
 };
 
-struct CachedRsEncoder(reed_solomon_erasure::galois_8::ReedSolomon);
-
-impl std::fmt::Debug for CachedRsEncoder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "ReedSolomon({}+{})",
-            self.0.data_shard_count(),
-            self.0.parity_shard_count()
-        )
-    }
-}
-
 #[derive(Debug)]
 pub(super) struct MessageState {
     pub(super) key: MessageKey,
@@ -43,8 +30,10 @@ pub(super) struct MessageState {
     parity_attempts: Vec<usize>,
     fec_recovered: Option<Vec<usize>>,
     fec_recovered_flags: Option<Vec<u8>>,
-    rs_encoder: Option<CachedRsEncoder>,
-    rs_shard_buf: Vec<Option<Vec<u8>>>,
+    rs_decoder: Option<reed_solomon_engine::Decoder>,
+    // Every slot is a `chunk_size` buffer; presence is tracked out-of-band in
+    // the `ShardMask` the decoder takes, and missing slots are zeroed scratch.
+    rs_shard_buf: Vec<Vec<u8>>,
     pending_bytes_estimate: usize,
     pub(super) first_source: SocketAddr,
     pub(super) created_at: Instant,
@@ -106,16 +95,15 @@ impl MessageState {
         let parity_slots = num_groups.saturating_mul(parity_shards_per_group);
         let fec_enabled = fec_mode.is_enabled();
 
-        let rs_encoder = match fec_mode {
+        let rs_decoder = match fec_mode {
             FecMode::ReedSolomon {
                 data_shards,
                 parity_shards,
-            } => reed_solomon_erasure::galois_8::ReedSolomon::new(
+            } => reed_solomon_engine::Decoder::new(
                 usize::from(data_shards),
                 usize::from(parity_shards),
             )
-            .ok()
-            .map(CachedRsEncoder),
+            .ok(),
             _ => None,
         };
 
@@ -142,7 +130,7 @@ impl MessageState {
             parity_attempts: vec![redundancy + 1; parity_slots],
             fec_recovered: fec_enabled.then(Vec::new),
             fec_recovered_flags: fec_enabled.then(|| vec![0_u8; total_chunks]),
-            rs_encoder,
+            rs_decoder,
             rs_shard_buf: Vec::new(),
             pending_bytes_estimate,
             first_source: source,
@@ -413,48 +401,17 @@ impl MessageState {
             return;
         }
 
-        let encoder = match self.rs_encoder.as_ref() {
-            Some(e) => &e.0,
-            None => return,
-        };
-
-        // Reuse the shard buffer across recovery attempts.
-        self.rs_shard_buf.clear();
-
-        // Data shards
-        for pos in start_pos..end_pos {
-            match &self.chunks[pos] {
-                Some(chunk) => {
-                    let mut padded = vec![0_u8; self.chunk_size];
-                    padded[..chunk.len()].copy_from_slice(chunk);
-                    self.rs_shard_buf.push(Some(padded));
-                }
-                None => self.rs_shard_buf.push(None),
-            }
-        }
-        // Pad with present zero shards for partial final group
-        for _ in actual_data_in_group..ds {
-            self.rs_shard_buf.push(Some(vec![0_u8; self.chunk_size]));
-        }
-        // Parity shards
-        for pi in 0..ps {
-            let slot = parity_base + pi;
-            if slot < self.parity_chunks.len() {
-                self.rs_shard_buf.push(self.parity_chunks[slot].clone());
-            } else {
-                self.rs_shard_buf.push(None);
-            }
-        }
-
-        // Reconstruct
-        if encoder.reconstruct(&mut self.rs_shard_buf).is_err() {
+        // Reconstruct. Scoped to a helper so that no borrow of the decoder or
+        // the shard buffer is still outstanding while the recovered chunks are
+        // written back below.
+        if !self.reconstruct_group_shards(start_pos, end_pos, parity_base, ds, ps) {
             return;
         }
 
         // Extract recovered data shards
         for (i, pos) in (start_pos..end_pos).enumerate() {
             if self.chunks[pos].is_none() {
-                if let Some(Some(recovered_padded)) = self.rs_shard_buf.get(i) {
+                if let Some(recovered_padded) = self.rs_shard_buf.get(i) {
                     let expected_len = self.expected_chunk_length_for_index(pos);
                     let recovered = recovered_padded[..expected_len].to_vec();
                     if self.chunks[pos].is_none() {
@@ -488,6 +445,70 @@ impl MessageState {
                 }
             }
         }
+    }
+
+    /// Loads one parity group's shards into `rs_shard_buf` and reconstructs the
+    /// missing data shards in place, returning whether that succeeded.
+    ///
+    /// Slots `0..ds` hold the data shards and `ds..ds + ps` the parity shards,
+    /// which is the ordering the code is defined over. Slots whose packet has
+    /// not arrived are zeroed and left out of the presence mask; the decoder
+    /// treats those as scratch and overwrites them.
+    fn reconstruct_group_shards(
+        &mut self,
+        start_pos: usize,
+        end_pos: usize,
+        parity_base: usize,
+        ds: usize,
+        ps: usize,
+    ) -> bool {
+        // Destructured so that the decoder and the shard buffer are borrowed as
+        // disjoint fields; `reconstruct_data` needs `&mut` on the decoder for
+        // its internal workspace, which a `&mut self` method call would
+        // conflict with.
+        let Self {
+            rs_decoder,
+            rs_shard_buf,
+            chunks,
+            parity_chunks,
+            chunk_size,
+            ..
+        } = self;
+        let Some(decoder) = rs_decoder.as_mut() else {
+            return false;
+        };
+        let chunk_size = *chunk_size;
+
+        // Reuse the buffers across recovery attempts: `clear` then `resize`
+        // zero-fills without releasing the allocation.
+        rs_shard_buf.resize_with(ds + ps, Vec::new);
+        for shard in rs_shard_buf.iter_mut() {
+            shard.clear();
+            shard.resize(chunk_size, 0_u8);
+        }
+
+        let mut present = reed_solomon_engine::ShardMask::EMPTY;
+        for (slot, pos) in (start_pos..end_pos).enumerate() {
+            if let Some(chunk) = &chunks[pos] {
+                rs_shard_buf[slot][..chunk.len()].copy_from_slice(chunk);
+                present.insert(slot);
+            }
+        }
+        // A partial final group is padded out with zero shards, which the
+        // sender encoded over and which are therefore always available.
+        for slot in (end_pos - start_pos)..ds {
+            present.insert(slot);
+        }
+        for pi in 0..ps {
+            if let Some(parity) = parity_chunks.get(parity_base + pi).and_then(Option::as_ref) {
+                rs_shard_buf[ds + pi][..parity.len()].copy_from_slice(parity);
+                present.insert(ds + pi);
+            }
+        }
+
+        let mut shards: Vec<&mut [u8]> = rs_shard_buf.iter_mut().map(Vec::as_mut_slice).collect();
+        // Only data shards are read back, so skip recomputing missing parity.
+        decoder.reconstruct_data(&mut shards, &present).is_ok()
     }
 
     fn estimate_pending_footprint(

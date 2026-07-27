@@ -170,11 +170,11 @@ fn lower_attempt_direct_chunk_replaces_fec_recovery() {
     let parity_fec = pack_rs_parity_field(2, 1, 0).unwrap();
 
     // RS(2,1) parity for group 0 (chunk0, chunk1)
-    let encoder = reed_solomon_erasure::galois_8::ReedSolomon::new(2, 1).unwrap();
+    let encoder = reed_solomon_engine::Encoder::new(2, 1).unwrap();
     let data_refs: Vec<&[u8]> = vec![&chunk0, &chunk1];
     let mut parity_group_0 = vec![0u8; usize::from(chunk_size)];
     let mut parity_refs: Vec<&mut [u8]> = vec![parity_group_0.as_mut_slice()];
-    encoder.encode_sep(&data_refs, &mut parity_refs).unwrap();
+    encoder.encode(&data_refs, &mut parity_refs).unwrap();
 
     let packet0 = encode_packet(
         packet_header(
@@ -274,6 +274,55 @@ fn lower_attempt_direct_chunk_replaces_fec_recovery() {
 }
 
 // --- Reed-Solomon tests ---
+
+/// Pins the parity bytes UniUDP puts on the wire.
+///
+/// The RS construction is part of the protocol: a sender and a receiver running
+/// different UniUDP versions must agree on it, or parity shards silently stop
+/// reconstructing. Every other FEC test derives its expected parity from the
+/// same encoder under test, so all of them would still pass if the underlying
+/// generator matrix changed. These are hardcoded known-answer vectors, so they
+/// would not.
+///
+/// Values are from the systematic Vandermonde construction over GF(2^8) with
+/// reduction polynomial 0x11D, the de facto interchange format for byte-wise RS
+/// erasure coding.
+#[test]
+fn rs_parity_wire_format_is_stable() {
+    // RS(4,2) generator coefficients, row-major.
+    let encoder = reed_solomon_engine::Encoder::new(4, 2).unwrap();
+    assert_eq!(
+        encoder.parity_matrix(),
+        &[0x1B, 0x1C, 0x12, 0x14, 0x1C, 0x1B, 0x14, 0x12],
+        "RS(4,2) parity matrix changed: this is a wire-format break"
+    );
+
+    // One-byte shards: d = [01, 02, 03, 04] encodes to parity [45, 5E].
+    let data: [&[u8]; 4] = [&[0x01], &[0x02], &[0x03], &[0x04]];
+    let (mut p0, mut p1) = ([0_u8; 1], [0_u8; 1]);
+    encoder.encode(&data, &mut [&mut p0, &mut p1]).unwrap();
+    assert_eq!([p0[0], p1[0]], [0x45, 0x5E]);
+
+    // Five-byte shards, to catch a change that only shows up past the first byte.
+    let data: [&[u8]; 4] = [b"alpha", b"bravo", b"charl", b"delta"];
+    let (mut p0, mut p1) = ([0_u8; 5], [0_u8; 5]);
+    encoder.encode(&data, &mut [&mut p0, &mut p1]).unwrap();
+    assert_eq!(p0, [0x25, 0xE5, 0x33, 0x39, 0x03]);
+    assert_eq!(p1, [0x3E, 0x91, 0x6A, 0x77, 0x07]);
+
+    // A second parameter pair, since the matrix is built per (data, parity).
+    let encoder = reed_solomon_engine::Encoder::new(8, 4).unwrap();
+    assert_eq!(
+        encoder.parity_matrix(),
+        &[
+            0x1A, 0x84, 0xBA, 0x33, 0xE7, 0x10, 0xC6, 0x27, //
+            0x84, 0x1A, 0x33, 0xBA, 0x10, 0xE7, 0x27, 0xC6, //
+            0xBA, 0x33, 0x1A, 0x84, 0xC6, 0x27, 0xE7, 0x10, //
+            0x33, 0xBA, 0x84, 0x1A, 0x27, 0xC6, 0x10, 0xE7,
+        ],
+        "RS(8,4) parity matrix changed: this is a wire-format break"
+    );
+}
 
 #[test]
 fn rs_send_receive_recovers_single_missing_chunk() {

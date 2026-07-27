@@ -134,14 +134,13 @@ fn bench_fec_recovery(c: &mut Criterion) {
         .collect();
 
     // Build RS parity using the encoder
-    let encoder =
-        reed_solomon_erasure::galois_8::ReedSolomon::new(data_shards.into(), parity_shards.into())
-            .expect("rs encoder");
+    let encoder = reed_solomon_engine::Encoder::new(data_shards.into(), parity_shards.into())
+        .expect("rs encoder");
     let data_refs: Vec<&[u8]> = data_chunks.iter().map(|c| c.as_slice()).collect();
     let mut parity_chunk = vec![0_u8; chunk_size];
     let mut parity_refs: Vec<&mut [u8]> = vec![parity_chunk.as_mut_slice()];
     encoder
-        .encode_sep(&data_refs, &mut parity_refs)
+        .encode(&data_refs, &mut parity_refs)
         .expect("rs encode");
 
     let mut message_id = 0_u64;
