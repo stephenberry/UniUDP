@@ -1,5 +1,59 @@
 use super::common::*;
 
+/// What the receiver charges against `max_pending_bytes` for one partially
+/// received message of the given shape.
+///
+/// The budget tests need a threshold that admits some number of these and not
+/// one more. Hardcoding that threshold ties them to `size_of::<MessageState>()`,
+/// which moves for reasons that have nothing to do with eviction: swapping the
+/// FEC backend once changed it fourfold and broke these tests without either
+/// behaviour they assert having changed. Asking the receiver keeps them pinned
+/// to the quantity actually being enforced.
+fn pending_footprint(total_chunks: u32, message_length: u32, chunk_size: u16) -> usize {
+    let sender = bind_local();
+    let mut receiver_socket = bind_local();
+    let destination = receiver_socket.local_addr().unwrap();
+    let sender_id = SenderId(0xFE);
+
+    let packet = encode_packet(
+        packet_header(
+            sender_id,
+            1,
+            0,
+            0,
+            total_chunks,
+            message_length,
+            chunk_size,
+            0,
+            1,
+            1,
+            pack_fec_field(1, false).unwrap(),
+        ),
+        &vec![0x5A; usize::from(chunk_size)],
+    )
+    .unwrap();
+    sender.send_to(&packet, destination).unwrap();
+
+    // Default config, so the probe is never itself refused. Receiving under a
+    // key that cannot match leaves the message pending rather than completing.
+    let mut receiver = Receiver::new();
+    let _ = receiver.receive_message(
+        &mut receiver_socket,
+        receive_options! {
+            key: Some(key(sender_id, 999_999_999)),
+            inactivity_timeout: Duration::from_millis(50),
+            overall_timeout: Duration::from_millis(300),
+            ..ReceiveOptions::default()
+        },
+    );
+    assert_eq!(
+        receiver.pending_messages(),
+        1,
+        "the probe message should be held for reassembly"
+    );
+    receiver.estimated_pending_bytes()
+}
+
 #[test]
 fn pending_eviction_drops_oldest_partial_message() {
     let sender = bind_local();
@@ -110,11 +164,15 @@ fn pending_byte_budget_evicts_oldest_partial_message() {
         sender.send_to(&packet, destination).unwrap();
     }
 
-    // Calibrated to the per-message pending footprint (~2.5 KiB for a 2-chunk,
-    // 2048-byte message): room for two pending messages but not three, so the
-    // third arrival must evict the oldest.
+    // Room for two of these but not three, so the third arrival must evict the
+    // oldest. Halfway between the two multiples, so neither bound is marginal.
+    let footprint = pending_footprint(2, 2048, 1024);
+    let max_pending_bytes = footprint * 5 / 2;
+    assert!(max_pending_bytes >= footprint * 2);
+    assert!(max_pending_bytes < footprint * 3);
+
     let mut receiver = Receiver::try_with_config(receiver_config! {
-        max_pending_bytes: 6000,
+        max_pending_bytes: max_pending_bytes,
         ..ReceiverConfig::default()
     })
     .unwrap();
@@ -225,11 +283,16 @@ fn oversized_pending_message_is_dropped_without_evicting_fit_message() {
     .unwrap();
     sender.send_to(&oversized_packet, destination).unwrap();
 
-    // Calibrated to the per-message pending footprint so that the 2-chunk
-    // message fits (~2.5 KiB) while the 3-chunk one (~3.6 KiB) does not fit even
-    // on its own, and so is dropped rather than evicting the message that fits.
+    // Admits the smaller message and refuses the larger one even on its own, so
+    // the larger is dropped rather than evicting the one that fits.
+    let fits = pending_footprint(2, 2048, 1024);
+    let oversized = pending_footprint(3, 3072, 1024);
+    let max_pending_bytes = (fits + oversized) / 2;
+    assert!(max_pending_bytes >= fits);
+    assert!(max_pending_bytes < oversized);
+
     let mut receiver = Receiver::try_with_config(receiver_config! {
-        max_pending_bytes: 3000,
+        max_pending_bytes: max_pending_bytes,
         ..ReceiverConfig::default()
     })
     .unwrap();
@@ -303,6 +366,13 @@ fn metadata_heavy_message_is_rejected_by_pending_byte_budget() {
     .unwrap();
     sender.send_to(&packet, destination).unwrap();
 
+    // Unlike the two tests above, this threshold is not calibrated and does not
+    // need to be. They need a budget sitting between two nearby multiples of one
+    // message's footprint, which moves whenever that footprint does. This one
+    // only needs a budget the message cannot possibly fit: 4096 chunks of
+    // per-chunk bookkeeping is on the order of 160 KiB whatever the payload, so
+    // 10,000 has more than an order of magnitude of margin, and the one-byte
+    // payload is what makes the point that metadata alone blows the budget.
     let mut receiver = Receiver::try_with_config(receiver_config! {
         max_pending_bytes: 10_000,
         ..ReceiverConfig::default()

@@ -50,6 +50,17 @@ pub(super) struct ReceiverState {
 }
 
 impl ReceiverState {
+    /// Number of partially received messages currently held.
+    pub(super) fn pending_messages(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Running total of the per-message footprint estimates, which is the
+    /// quantity `max_pending_bytes` is compared against.
+    pub(super) fn estimated_pending_bytes(&self) -> usize {
+        self.pending_estimated_bytes
+    }
+
     pub(super) fn clear(&mut self) {
         self.completed.clear();
         self.completed_index.clear();
