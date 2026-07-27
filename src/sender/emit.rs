@@ -19,13 +19,13 @@ use super::plan::{ParityContext, SendPlan};
 /// Reusable sender-side scratch buffers for high-throughput paths.
 ///
 /// Reuse one instance across repeated sends to avoid per-call packet/parity
-/// buffer allocations.  The RS encoder is cached so that its internal Galois
-/// field tables are not rebuilt on every parity group.
+/// buffer allocations.  The RS codec is cached so that its generator matrix is
+/// not rebuilt on every parity group.
 pub struct SendScratch {
     packet_buffer: Vec<u8>,
     rs_data_buffers: Vec<Vec<u8>>,
     rs_parity_buffers: Vec<Vec<u8>>,
-    rs_encoder: Option<reed_solomon_engine::Encoder>,
+    rs_codec: Option<reed_solomon_engine::Codec>,
 }
 
 impl SendScratch {
@@ -57,11 +57,11 @@ impl SendScratch {
                 }
                 // Cache the RS encoder so it is not rebuilt per parity group.
                 let needs_rebuild = self
-                    .rs_encoder
+                    .rs_codec
                     .as_ref()
-                    .is_none_or(|e| e.data_shards() != ds || e.parity_shards() != ps);
+                    .is_none_or(|c| c.data_shards() != ds || c.parity_shards() != ps);
                 if needs_rebuild {
-                    self.rs_encoder = reed_solomon_engine::Encoder::new(ds, ps).ok();
+                    self.rs_codec = reed_solomon_engine::Codec::new(ds, ps).ok();
                 }
             }
         }
@@ -154,23 +154,20 @@ where
         match plan.fec_mode {
             FecMode::None => {}
             FecMode::ReedSolomon { .. } => {
-                let encoder = match scratch.rs_encoder.as_ref() {
-                    Some(e) => e,
+                let codec = match scratch.rs_codec.as_ref() {
+                    Some(c) => c,
                     None => {
                         return Err(EmitFailure::new(
                             plan.key,
                             *runtime.packets_sent,
-                            UniUdpError::encode(
-                                EncodeContext::Packet,
-                                "RS encoder not initialized",
-                            ),
+                            UniUdpError::encode(EncodeContext::Packet, "RS codec not initialized"),
                         ));
                     }
                 };
                 let mut rs = RsScratchRef {
                     data_buffers: &mut scratch.rs_data_buffers,
                     parity_buffers: &mut scratch.rs_parity_buffers,
-                    encoder,
+                    codec,
                 };
                 if let Err(error) = maybe_emit_rs_parity_group(
                     &parity_context,
@@ -227,23 +224,20 @@ pub(super) async fn emit_with_tokio_socket_with_scratch(
         match plan.fec_mode {
             FecMode::None => {}
             FecMode::ReedSolomon { .. } => {
-                let encoder = match scratch.rs_encoder.as_ref() {
-                    Some(e) => e,
+                let codec = match scratch.rs_codec.as_ref() {
+                    Some(c) => c,
                     None => {
                         return Err(EmitFailure::new(
                             plan.key,
                             *runtime.packets_sent,
-                            UniUdpError::encode(
-                                EncodeContext::Packet,
-                                "RS encoder not initialized",
-                            ),
+                            UniUdpError::encode(EncodeContext::Packet, "RS codec not initialized"),
                         ));
                     }
                 };
                 let mut rs = RsScratchRef {
                     data_buffers: &mut scratch.rs_data_buffers,
                     parity_buffers: &mut scratch.rs_parity_buffers,
-                    encoder,
+                    codec,
                 };
                 if let Err(error) = maybe_emit_rs_parity_group_async(
                     &parity_context,
@@ -394,7 +388,7 @@ fn build_parity_header(ctx: &ParityContext, group_start: usize, fec_field: u16) 
 struct RsScratchRef<'a> {
     data_buffers: &'a mut [Vec<u8>],
     parity_buffers: &'a mut [Vec<u8>],
-    encoder: &'a reed_solomon_engine::Encoder,
+    codec: &'a reed_solomon_engine::Codec,
 }
 
 fn buffer_rs_data_shard(
@@ -433,17 +427,11 @@ fn encode_and_emit_rs_parity(
         buf[..chunk_size].fill(0_u8);
     }
 
-    // RS encode using cached encoder
-    let data_refs: Vec<&[u8]> = rs.data_buffers[..ds]
-        .iter()
-        .map(|b| &b[..chunk_size])
-        .collect();
-    let mut parity_refs: Vec<&mut [u8]> = rs.parity_buffers[..ps]
-        .iter_mut()
-        .map(|b| &mut b[..chunk_size])
-        .collect();
-    rs.encoder
-        .encode(&data_refs, &mut parity_refs)
+    // `ensure_for_plan` sized every buffer to exactly `chunk_size`, and the codec
+    // takes any slice of byte containers, so the shards go in as they are.
+    // Collecting pointer slices here cost two allocations per parity group.
+    rs.codec
+        .encode(&rs.data_buffers[..ds], &mut rs.parity_buffers[..ps])
         .map_err(|_| UniUdpError::encode(EncodeContext::Packet, "RS encoding failed"))?;
 
     // Emit parity packets
@@ -510,17 +498,10 @@ async fn encode_and_emit_rs_parity_async(
         buf[..chunk_size].fill(0_u8);
     }
 
-    // RS encode using cached encoder
-    let data_refs: Vec<&[u8]> = rs.data_buffers[..ds]
-        .iter()
-        .map(|b| &b[..chunk_size])
-        .collect();
-    let mut parity_refs: Vec<&mut [u8]> = rs.parity_buffers[..ps]
-        .iter_mut()
-        .map(|b| &mut b[..chunk_size])
-        .collect();
-    rs.encoder
-        .encode(&data_refs, &mut parity_refs)
+    // As in the sync path: the buffers are already the right length and the codec
+    // is generic over the container, so nothing is collected per group.
+    rs.codec
+        .encode(&rs.data_buffers[..ds], &mut rs.parity_buffers[..ps])
         .map_err(|_| UniUdpError::encode(EncodeContext::Packet, "RS encoding failed"))?;
 
     let group_start = chunk_idx - group_offset;

@@ -84,8 +84,8 @@ fn generate_packets(
     let data_field = pack_rs_data_field(data_shards, parity_shards).unwrap();
     let fec_group_size = usize::from(data_shards);
 
-    let encoder =
-        reed_solomon_engine::Encoder::new(usize::from(data_shards), usize::from(parity_shards))
+    let codec =
+        reed_solomon_engine::Codec::new(usize::from(data_shards), usize::from(parity_shards))
             .unwrap();
 
     // Collect all chunk payloads
@@ -140,10 +140,7 @@ fn generate_packets(
                 .map(|_| vec![0u8; chunk_size_usize])
                 .collect();
 
-            let data_refs: Vec<&[u8]> = data_bufs.iter().map(|b| b.as_slice()).collect();
-            let mut parity_refs: Vec<&mut [u8]> =
-                parity_bufs.iter_mut().map(|b| b.as_mut_slice()).collect();
-            encoder.encode(&data_refs, &mut parity_refs).unwrap();
+            codec.encode(&data_bufs, &mut parity_bufs).unwrap();
 
             for (pi, parity_buf) in parity_bufs.iter().enumerate() {
                 let parity_field =

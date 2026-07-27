@@ -170,11 +170,14 @@ fn lower_attempt_direct_chunk_replaces_fec_recovery() {
     let parity_fec = pack_rs_parity_field(2, 1, 0).unwrap();
 
     // RS(2,1) parity for group 0 (chunk0, chunk1)
-    let encoder = reed_solomon_engine::Encoder::new(2, 1).unwrap();
-    let data_refs: Vec<&[u8]> = vec![&chunk0, &chunk1];
+    let codec = reed_solomon_engine::Codec::new(2, 1).unwrap();
     let mut parity_group_0 = vec![0u8; usize::from(chunk_size)];
-    let mut parity_refs: Vec<&mut [u8]> = vec![parity_group_0.as_mut_slice()];
-    encoder.encode(&data_refs, &mut parity_refs).unwrap();
+    codec
+        .encode(
+            &[&chunk0, &chunk1],
+            std::slice::from_mut(&mut parity_group_0),
+        )
+        .unwrap();
 
     let packet0 = encode_packet(
         packet_header(
@@ -290,7 +293,7 @@ fn lower_attempt_direct_chunk_replaces_fec_recovery() {
 #[test]
 fn rs_parity_wire_format_is_stable() {
     // RS(4,2) generator coefficients, row-major.
-    let encoder = reed_solomon_engine::Encoder::new(4, 2).unwrap();
+    let encoder = reed_solomon_engine::Codec::new(4, 2).unwrap();
     assert_eq!(
         encoder.parity_matrix(),
         &[0x1B, 0x1C, 0x12, 0x14, 0x1C, 0x1B, 0x14, 0x12],
@@ -311,7 +314,7 @@ fn rs_parity_wire_format_is_stable() {
     assert_eq!(p1, [0x3E, 0x91, 0x6A, 0x77, 0x07]);
 
     // A second parameter pair, since the matrix is built per (data, parity).
-    let encoder = reed_solomon_engine::Encoder::new(8, 4).unwrap();
+    let encoder = reed_solomon_engine::Codec::new(8, 4).unwrap();
     assert_eq!(
         encoder.parity_matrix(),
         &[

@@ -30,10 +30,13 @@ pub(super) struct MessageState {
     parity_attempts: Vec<usize>,
     fec_recovered: Option<Vec<usize>>,
     fec_recovered_flags: Option<Vec<u8>>,
-    rs_decoder: Option<reed_solomon_engine::Decoder>,
+    rs_codec: Option<reed_solomon_engine::Codec>,
     // Every slot is a `chunk_size` buffer; presence is tracked out-of-band in
-    // the `ShardMask` the decoder takes, and missing slots are zeroed scratch.
+    // the `ShardMask` the codec takes, and missing slots are zeroed scratch.
     rs_shard_buf: Vec<Vec<u8>>,
+    // Decode scratch, sized for this message's split. Empty unless RS is in
+    // use, and reused across every recovery attempt for this message.
+    rs_workspace: Vec<u8>,
     pending_bytes_estimate: usize,
     pub(super) first_source: SocketAddr,
     pub(super) created_at: Instant,
@@ -95,23 +98,28 @@ impl MessageState {
         let parity_slots = num_groups.saturating_mul(parity_shards_per_group);
         let fec_enabled = fec_mode.is_enabled();
 
-        let rs_decoder = match fec_mode {
+        let rs_codec = match fec_mode {
             FecMode::ReedSolomon {
                 data_shards,
                 parity_shards,
-            } => reed_solomon_engine::Decoder::new(
+            } => reed_solomon_engine::Codec::new(
                 usize::from(data_shards),
                 usize::from(parity_shards),
             )
             .ok(),
             _ => None,
         };
+        let rs_workspace = rs_codec
+            .as_ref()
+            .map(reed_solomon_engine::Codec::workspace)
+            .unwrap_or_default();
 
         let pending_bytes_estimate = Self::estimate_pending_footprint(
             total_chunks,
             parity_slots,
             message_length,
             chunk_size,
+            rs_workspace.len(),
         );
         let mut state = Self {
             key,
@@ -130,8 +138,9 @@ impl MessageState {
             parity_attempts: vec![redundancy + 1; parity_slots],
             fec_recovered: fec_enabled.then(Vec::new),
             fec_recovered_flags: fec_enabled.then(|| vec![0_u8; total_chunks]),
-            rs_decoder,
+            rs_codec,
             rs_shard_buf: Vec::new(),
+            rs_workspace,
             pending_bytes_estimate,
             first_source: source,
             created_at: Instant::now(),
@@ -452,7 +461,7 @@ impl MessageState {
     ///
     /// Slots `0..ds` hold the data shards and `ds..ds + ps` the parity shards,
     /// which is the ordering the code is defined over. Slots whose packet has
-    /// not arrived are zeroed and left out of the presence mask; the decoder
+    /// not arrived are zeroed and left out of the presence mask; the codec
     /// treats those as scratch and overwrites them.
     fn reconstruct_group_shards(
         &mut self,
@@ -462,19 +471,19 @@ impl MessageState {
         ds: usize,
         ps: usize,
     ) -> bool {
-        // Destructured so that the decoder and the shard buffer are borrowed as
-        // disjoint fields; `reconstruct_data` needs `&mut` on the decoder for
-        // its internal workspace, which a `&mut self` method call would
-        // conflict with.
+        // Destructured because the two scratch buffers are written while the
+        // chunk fields are read. The codec itself is borrowed shared: it holds
+        // only the generator matrix, which reconstruction never mutates.
         let Self {
-            rs_decoder,
+            rs_codec,
             rs_shard_buf,
+            rs_workspace,
             chunks,
             parity_chunks,
             chunk_size,
             ..
         } = self;
-        let Some(decoder) = rs_decoder.as_mut() else {
+        let Some(codec) = rs_codec.as_ref() else {
             return false;
         };
         let chunk_size = *chunk_size;
@@ -506,9 +515,12 @@ impl MessageState {
             }
         }
 
-        let mut shards: Vec<&mut [u8]> = rs_shard_buf.iter_mut().map(Vec::as_mut_slice).collect();
         // Only data shards are read back, so skip recomputing missing parity.
-        decoder.reconstruct_data(&mut shards, &present).is_ok()
+        // `rs_shard_buf` is passed as it is: the codec is generic over the
+        // container, so there is no pointer slice to collect per recovery.
+        codec
+            .reconstruct_data(rs_shard_buf, &present, rs_workspace)
+            .is_ok()
     }
 
     fn estimate_pending_footprint(
@@ -516,6 +528,7 @@ impl MessageState {
         parity_slots: usize,
         message_length: usize,
         chunk_size: usize,
+        rs_workspace: usize,
     ) -> usize {
         let chunk_slots = total_chunks.saturating_mul(size_of::<Option<Vec<u8>>>());
         let chunk_lengths = total_chunks.saturating_mul(size_of::<usize>());
@@ -540,6 +553,7 @@ impl MessageState {
             .saturating_add(parity_attempts)
             .saturating_add(message_length)
             .saturating_add(parity_payload)
+            .saturating_add(rs_workspace)
     }
 
     pub(super) fn build_report(self, reason: CompletionReason) -> MessageReport {

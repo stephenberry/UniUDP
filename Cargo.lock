@@ -525,9 +525,9 @@ dependencies = [
 
 [[package]]
 name = "reed-solomon-engine"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8525e081e26b223185ef32bfc417a5a9b35541885eaa6d14ff5c5de136370574"
+checksum = "5d902386f55ac0890d3d0f56c932daa0b80b55bcf56631565eed76f0f7f54b6f"
 
 [[package]]
 name = "regex"
