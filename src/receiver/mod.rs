@@ -12,6 +12,7 @@ use crate::types::{
 
 mod loop_logic;
 mod message_state;
+mod rs_shared;
 mod session;
 mod socket;
 mod state;

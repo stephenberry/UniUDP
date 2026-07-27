@@ -2,6 +2,7 @@ use std::mem::size_of;
 use std::net::SocketAddr;
 use std::time::Instant;
 
+use super::rs_shared::RsShared;
 use crate::error::{Result, UniUdpError, ValidationContext};
 use crate::fec::{
     fec_group_size_from_field, fec_is_parity, fec_is_rs, fec_mode_from_field, rs_params_from_field,
@@ -30,13 +31,13 @@ pub(super) struct MessageState {
     parity_attempts: Vec<usize>,
     fec_recovered: Option<Vec<usize>>,
     fec_recovered_flags: Option<Vec<u8>>,
-    rs_codec: Option<reed_solomon_engine::Codec>,
     // Every slot is a `chunk_size` buffer; presence is tracked out-of-band in
     // the `ShardMask` the codec takes, and missing slots are zeroed scratch.
+    //
+    // The codec and the decode workspace are not here: both depend only on the
+    // shard split, so they live on the receiver and are shared by every pending
+    // message. See `RsShared`.
     rs_shard_buf: Vec<Vec<u8>>,
-    // Decode scratch, sized for this message's split. Empty unless RS is in
-    // use, and reused across every recovery attempt for this message.
-    rs_workspace: Vec<u8>,
     pending_bytes_estimate: usize,
     pub(super) first_source: SocketAddr,
     pub(super) created_at: Instant,
@@ -57,6 +58,7 @@ impl MessageState {
         key: MessageKey,
         source: SocketAddr,
         config: &ReceiverRuntimeConfig,
+        rs: &mut RsShared,
     ) -> Result<Self> {
         let total_chunks = usize::try_from(header.total_chunks).map_err(|_| {
             UniUdpError::validation(
@@ -98,28 +100,11 @@ impl MessageState {
         let parity_slots = num_groups.saturating_mul(parity_shards_per_group);
         let fec_enabled = fec_mode.is_enabled();
 
-        let rs_codec = match fec_mode {
-            FecMode::ReedSolomon {
-                data_shards,
-                parity_shards,
-            } => reed_solomon_engine::Codec::new(
-                usize::from(data_shards),
-                usize::from(parity_shards),
-            )
-            .ok(),
-            _ => None,
-        };
-        let rs_workspace = rs_codec
-            .as_ref()
-            .map(reed_solomon_engine::Codec::workspace)
-            .unwrap_or_default();
-
         let pending_bytes_estimate = Self::estimate_pending_footprint(
             total_chunks,
             parity_slots,
             message_length,
             chunk_size,
-            rs_workspace.len(),
         );
         let mut state = Self {
             key,
@@ -138,15 +123,13 @@ impl MessageState {
             parity_attempts: vec![redundancy + 1; parity_slots],
             fec_recovered: fec_enabled.then(Vec::new),
             fec_recovered_flags: fec_enabled.then(|| vec![0_u8; total_chunks]),
-            rs_codec,
             rs_shard_buf: Vec::new(),
-            rs_workspace,
             pending_bytes_estimate,
             first_source: source,
             created_at: Instant::now(),
             last_activity_at: Instant::now(),
         };
-        if state.update(header, payload) != PacketUpdateOutcome::Accepted {
+        if state.update(header, payload, rs) != PacketUpdateOutcome::Accepted {
             return Err(UniUdpError::validation(
                 ValidationContext::MessageMetadata,
                 "initial packet rejected",
@@ -188,7 +171,12 @@ impl MessageState {
         self.chunk_size
     }
 
-    pub(super) fn update(&mut self, header: &PacketHeader, payload: &[u8]) -> PacketUpdateOutcome {
+    pub(super) fn update(
+        &mut self,
+        header: &PacketHeader,
+        payload: &[u8],
+        rs: &mut RsShared,
+    ) -> PacketUpdateOutcome {
         if header.key() != self.key {
             return PacketUpdateOutcome::InvalidMetadata;
         }
@@ -245,7 +233,7 @@ impl MessageState {
         let is_parity = fec_is_parity(header.fec_field);
 
         if is_parity {
-            return self.handle_parity_packet(header, payload, attempt);
+            return self.handle_parity_packet(header, payload, attempt, rs);
         }
 
         let chunk_index = match usize::try_from(header.chunk_index) {
@@ -295,7 +283,7 @@ impl MessageState {
 
         if self.fec_mode.is_enabled() {
             let group_index = chunk_index / self.fec_group_size;
-            self.try_recover_group(group_index);
+            self.try_recover_group(group_index, rs);
         }
         PacketUpdateOutcome::Accepted
     }
@@ -305,6 +293,7 @@ impl MessageState {
         header: &PacketHeader,
         payload: &[u8],
         attempt: usize,
+        rs: &mut RsShared,
     ) -> PacketUpdateOutcome {
         let payload_len_declared = usize::from(header.payload_len);
         if payload_len_declared != self.chunk_size {
@@ -353,21 +342,27 @@ impl MessageState {
         self.parity_chunks[slot] = Some(payload.to_vec());
         self.parity_attempts[slot] = attempt;
 
-        self.try_recover_group(group_index);
+        self.try_recover_group(group_index, rs);
         PacketUpdateOutcome::Accepted
     }
 
-    fn try_recover_group(&mut self, group_index: usize) {
+    fn try_recover_group(&mut self, group_index: usize, rs: &mut RsShared) {
         if let FecMode::ReedSolomon {
             data_shards,
             parity_shards,
         } = self.fec_mode
         {
-            self.try_recover_group_rs(group_index, data_shards, parity_shards);
+            self.try_recover_group_rs(group_index, data_shards, parity_shards, rs);
         }
     }
 
-    fn try_recover_group_rs(&mut self, group_index: usize, data_shards: u8, parity_shards: u8) {
+    fn try_recover_group_rs(
+        &mut self,
+        group_index: usize,
+        data_shards: u8,
+        parity_shards: u8,
+        rs: &mut RsShared,
+    ) {
         let ds = usize::from(data_shards);
         let ps = usize::from(parity_shards);
         let start_pos = group_index * ds;
@@ -413,7 +408,14 @@ impl MessageState {
         // Reconstruct. Scoped to a helper so that no borrow of the decoder or
         // the shard buffer is still outstanding while the recovered chunks are
         // written back below.
-        if !self.reconstruct_group_shards(start_pos, end_pos, parity_base, ds, ps) {
+        if !self.reconstruct_group_shards(
+            start_pos,
+            end_pos,
+            parity_base,
+            data_shards,
+            parity_shards,
+            rs,
+        ) {
             return;
         }
 
@@ -468,24 +470,25 @@ impl MessageState {
         start_pos: usize,
         end_pos: usize,
         parity_base: usize,
-        ds: usize,
-        ps: usize,
+        data_shards: u8,
+        parity_shards: u8,
+        rs: &mut RsShared,
     ) -> bool {
-        // Destructured because the two scratch buffers are written while the
-        // chunk fields are read. The codec itself is borrowed shared: it holds
-        // only the generator matrix, which reconstruction never mutates.
+        let ds = usize::from(data_shards);
+        let ps = usize::from(parity_shards);
+        let Some((codec, workspace)) = rs.codec_and_workspace(data_shards, parity_shards) else {
+            return false;
+        };
+
+        // Destructured because the shard buffer is written while the chunk
+        // fields are read.
         let Self {
-            rs_codec,
             rs_shard_buf,
-            rs_workspace,
             chunks,
             parity_chunks,
             chunk_size,
             ..
         } = self;
-        let Some(codec) = rs_codec.as_ref() else {
-            return false;
-        };
         let chunk_size = *chunk_size;
 
         // Reuse the buffers across recovery attempts: `clear` then `resize`
@@ -519,7 +522,7 @@ impl MessageState {
         // `rs_shard_buf` is passed as it is: the codec is generic over the
         // container, so there is no pointer slice to collect per recovery.
         codec
-            .reconstruct_data(rs_shard_buf, &present, rs_workspace)
+            .reconstruct_data(rs_shard_buf, &present, workspace)
             .is_ok()
     }
 
@@ -528,7 +531,6 @@ impl MessageState {
         parity_slots: usize,
         message_length: usize,
         chunk_size: usize,
-        rs_workspace: usize,
     ) -> usize {
         let chunk_slots = total_chunks.saturating_mul(size_of::<Option<Vec<u8>>>());
         let chunk_lengths = total_chunks.saturating_mul(size_of::<usize>());
@@ -553,7 +555,6 @@ impl MessageState {
             .saturating_add(parity_attempts)
             .saturating_add(message_length)
             .saturating_add(parity_payload)
-            .saturating_add(rs_workspace)
     }
 
     pub(super) fn build_report(self, reason: CompletionReason) -> MessageReport {
