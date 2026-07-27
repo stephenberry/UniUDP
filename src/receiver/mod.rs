@@ -106,6 +106,50 @@ impl Receiver {
         self.last_receive_diagnostics
     }
 
+    /// Number of partially received messages currently held for reassembly.
+    ///
+    /// This is the quantity
+    /// [`max_pending_messages`](ReceiverRuntimeConfig::max_pending_messages)
+    /// bounds. Reading it alongside that limit shows how close the receiver is
+    /// to evicting, rather than only that it already has: the
+    /// `pending_budget_rejections` counter in
+    /// [`last_receive_diagnostics`](Self::last_receive_diagnostics) reports
+    /// admissions that were already refused.
+    ///
+    /// A message leaves this count when it completes, when it is evicted to
+    /// stay within a limit, or when it ages out of
+    /// [`pending_max_age`](ReceiverRuntimeConfig::pending_max_age).
+    pub fn pending_messages(&self) -> usize {
+        self.state.pending_messages()
+    }
+
+    /// Estimated bytes held by partially received messages.
+    ///
+    /// This is the quantity
+    /// [`max_pending_bytes`](ReceiverRuntimeConfig::max_pending_bytes) bounds,
+    /// so comparing the two shows the headroom left before incoming messages
+    /// start being refused or evicting older ones. Because reassembly buffers
+    /// grow with traffic the receiver has not finished, and a unidirectional
+    /// transport cannot ask for a dropped message again, this is worth watching
+    /// before the rejection counters move rather than after.
+    ///
+    /// # This is an estimate
+    ///
+    /// It accounts for payload bytes, per-chunk bookkeeping and fixed
+    /// per-message overhead, not for allocator behaviour, capacity in excess of
+    /// length, or the receiver's own buffers. Treat it as the number the budget
+    /// is enforced against, which is exactly what it is, and not as a
+    /// measurement of process memory.
+    ///
+    /// **The absolute value is not stable across versions.** Changing what a
+    /// pending message stores changes it; 1.2.0 cut the fixed per-message
+    /// overhead roughly fourfold. What is stable is its meaning relative to
+    /// `max_pending_bytes`, so prefer alerting on the ratio rather than on a
+    /// byte count pinned to one release.
+    pub fn estimated_pending_bytes(&self) -> usize {
+        self.state.estimated_pending_bytes()
+    }
+
     pub fn clear_state(&mut self) {
         self.state.clear();
         self.last_receive_diagnostics = ReceiveDiagnostics::default();

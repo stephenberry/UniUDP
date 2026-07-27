@@ -29,7 +29,7 @@ This makes UniUDP ideal for:
 | **Resource budgets** | Configurable limits on pending messages, bytes, and sessions |
 | **Async support** | Optional Tokio integration for non-blocking I/O |
 | **Thread-safe sender** | `Arc<Sender>` sharing across threads with `&self` send methods |
-| **Diagnostics** | Per-receive counters for packets, rejections, duplicates, and recoveries |
+| **Diagnostics** | Per-receive counters for packets, rejections, duplicates, and recoveries, plus live reassembly backlog |
 
 ## Installation
 
@@ -346,6 +346,26 @@ let diag = rx.last_receive_diagnostics();
 // diag.source_rejections, diag.duplicate_packets, ...
 # }
 ```
+
+Those counters report what already happened. To see pressure building before it costs you a message, read the reassembly backlog against the limits that bound it:
+
+```rust,no_run
+use uniudp::receiver::Receiver;
+
+# fn main() {
+# let rx = Receiver::new();
+let used = rx.estimated_pending_bytes();
+let limit = rx.config().max_pending_bytes();
+if used * 10 > limit * 8 {
+    // Over 80% of the budget. Past 100%, incoming messages start evicting
+    // older partial ones or being refused outright, and this transport is
+    // unidirectional, so a dropped message will not be sent again.
+}
+# let _ = rx.pending_messages();
+# }
+```
+
+`estimated_pending_bytes` is the quantity `max_pending_bytes` is enforced against, not a measurement of process memory, and its absolute value is not stable across versions. Alert on its ratio to the limit rather than on a byte count.
 
 ## API Modules
 
