@@ -1,9 +1,7 @@
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
-
 pub use crate::checksum::packet_crc32c;
 use crate::error::{DecodeContext, EncodeContext, Result, UniUdpError, ValidationContext};
 use crate::header_validation::validate_header_invariants;
+use crate::hmac_sha256::HmacSha256;
 use crate::types::{PacketAuth, PacketAuthKey, SenderId};
 pub use crate::types::{
     PacketHeader, PacketHeaderBuilder, HEADER_LENGTH, PACKET_AUTH_TAG_LENGTH,
@@ -33,8 +31,6 @@ const ATTEMPT_OFFSET: usize = 60;
 const FEC_FIELD_OFFSET: usize = 62;
 const CHECKSUM_OFFSET: usize = PACKET_CHECKSUM_OFFSET;
 const AUTH_TAG_OFFSET: usize = 68;
-
-type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParsedPacket<'a> {
@@ -209,12 +205,8 @@ pub(crate) fn verify_packet_auth(
     if !security.authenticated || packet.len() < AUTH_TAG_OFFSET {
         return false;
     }
-    // `verify_truncated_left` compares the leading `PACKET_AUTH_TAG_LENGTH`
-    // bytes of the digest in constant time, matching how `packet_auth_tag`
-    // truncates.
     packet_auth_mac(&packet[..AUTH_TAG_OFFSET], payload, auth_key)
         .verify_truncated_left(&security.auth_tag)
-        .is_ok()
 }
 
 pub(crate) fn write_header(
@@ -262,7 +254,8 @@ pub(crate) fn write_header(
 
     if let Some(auth) = security.packet_auth {
         let key = auth.key();
-        let tag = packet_auth_tag(&out[..AUTH_TAG_OFFSET], payload, key);
+        let tag = packet_auth_mac(&out[..AUTH_TAG_OFFSET], payload, key)
+            .finalize_truncated::<PACKET_AUTH_TAG_LENGTH>();
         out[AUTH_TAG_OFFSET..AUTH_TAG_OFFSET + PACKET_AUTH_TAG_LENGTH].copy_from_slice(&tag);
     } else {
         out[AUTH_TAG_OFFSET..AUTH_TAG_OFFSET + PACKET_AUTH_TAG_LENGTH].fill(0_u8);
@@ -424,22 +417,8 @@ fn packet_auth_mac(
     payload: &[u8],
     auth_key: &PacketAuthKey,
 ) -> HmacSha256 {
-    let mut mac = HmacSha256::new_from_slice(auth_key.as_bytes())
-        .expect("HMAC-SHA256 accepts arbitrary key lengths");
+    let mut mac = HmacSha256::new(auth_key.as_bytes());
     mac.update(header_without_auth);
     mac.update(payload);
     mac
-}
-
-fn packet_auth_tag(
-    header_without_auth: &[u8],
-    payload: &[u8],
-    auth_key: &PacketAuthKey,
-) -> [u8; PACKET_AUTH_TAG_LENGTH] {
-    let digest = packet_auth_mac(header_without_auth, payload, auth_key)
-        .finalize()
-        .into_bytes();
-    let mut tag = [0_u8; PACKET_AUTH_TAG_LENGTH];
-    tag.copy_from_slice(&digest[..PACKET_AUTH_TAG_LENGTH]);
-    tag
 }
