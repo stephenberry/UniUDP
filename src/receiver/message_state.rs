@@ -370,15 +370,11 @@ impl MessageState {
         let actual_data_in_group = end_pos - start_pos;
 
         // Count available data shards
-        let mut data_present = 0_usize;
-        let mut data_missing = 0_usize;
-        for pos in start_pos..end_pos {
-            if self.chunks[pos].is_some() {
-                data_present += 1;
-            } else {
-                data_missing += 1;
-            }
-        }
+        let data_present = self.chunks[start_pos..end_pos]
+            .iter()
+            .filter(|chunk| chunk.is_some())
+            .count();
+        let data_missing = actual_data_in_group - data_present;
 
         // If all data present, nothing to recover
         if data_missing == 0 {

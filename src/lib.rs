@@ -6,6 +6,7 @@ mod error;
 pub mod fec;
 mod header_validation;
 pub mod packet;
+mod random;
 pub mod receiver;
 pub mod sender;
 mod types;

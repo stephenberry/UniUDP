@@ -4,7 +4,7 @@ use crate::error::ValidationContext;
 
 #[cfg(feature = "tokio")]
 use super::socket::recv_from_timeout_async;
-use super::socket::{recv_from_timeout, SocketReadTimeoutGuard, SocketReadinessWaiter};
+use super::socket::{recv_from_timeout, SocketReadTimeoutGuard};
 use super::{
     CompletionReason, MessageReport, ReceiveDiagnostics, ReceiveLoopControl, ReceiveLoopDecision,
 };
@@ -128,7 +128,6 @@ impl Receiver {
     fn receive_single_sync(
         &mut self,
         socket: &std::net::UdpSocket,
-        readiness: &mut SocketReadinessWaiter,
         options: &ReceiveOptions,
     ) -> Result<MessageReport> {
         self.last_receive_diagnostics = ReceiveDiagnostics::default();
@@ -148,8 +147,7 @@ impl Receiver {
                 } => (cleanup_at, wait_time),
             };
 
-            let next_packet =
-                recv_from_timeout(socket, wait_time, &mut self.recv_buffer, readiness)?;
+            let next_packet = recv_from_timeout(socket, wait_time, &mut self.recv_buffer)?;
             match self.process_received_packet(
                 next_packet,
                 cleanup_at,
@@ -223,9 +221,11 @@ impl Receiver {
     /// save/restore cycle. (The async variant uses `tokio::time::timeout`
     /// instead, so it only needs `&`.)
     ///
-    /// Blocking sockets are preferred. Nonblocking sockets are also supported:
-    /// `WouldBlock` is treated as no-data-yet and waits on socket readiness
-    /// until timeout budget is exhausted.
+    /// Blocking sockets are preferred: the read timeout does the waiting, so
+    /// each datagram costs one `recv_from`. Nonblocking sockets are also
+    /// supported, but since they cannot wait, `WouldBlock` is treated as
+    /// no-data-yet and retried under a short capped backoff until the timeout
+    /// budget is exhausted.
     /// Do not concurrently receive from the same `UdpSocket` (including any
     /// `try_clone()` handles) while this method is running.
     pub fn receive_message(
@@ -238,8 +238,7 @@ impl Receiver {
         self.ensure_recv_buffer();
 
         let _timeout_guard = SocketReadTimeoutGuard::capture(socket)?;
-        let mut readiness = SocketReadinessWaiter::new(socket)?;
-        self.receive_single_sync(socket, &mut readiness, &options)
+        self.receive_single_sync(socket, &options)
     }
 
     /// Repeatedly receives messages from `socket` and invokes `on_message` for
@@ -269,10 +268,9 @@ impl Receiver {
         self.ensure_recv_buffer();
 
         let _timeout_guard = SocketReadTimeoutGuard::capture(socket)?;
-        let mut readiness = SocketReadinessWaiter::new(socket)?;
         let mut delivered = 0usize;
         loop {
-            let report = self.receive_single_sync(socket, &mut readiness, &options)?;
+            let report = self.receive_single_sync(socket, &options)?;
             delivered = delivered.saturating_add(1);
             if matches!(on_message(report), ReceiveLoopControl::Stop) {
                 return Ok(delivered);

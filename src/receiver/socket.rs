@@ -2,24 +2,17 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
-use mio::unix::SourceFd;
-#[cfg(windows)]
-use mio::windows::SourceSocket;
-use mio::{Events, Interest, Poll, Token};
-#[cfg(unix)]
-use std::os::fd::{AsRawFd, RawFd};
-#[cfg(windows)]
-use std::os::windows::io::{AsRawSocket, RawSocket};
-
 use crate::error::{Result, UniUdpError};
 #[cfg(feature = "tokio")]
 use tokio::net::UdpSocket as TokioUdpSocket;
 #[cfg(feature = "tokio")]
 use tokio::time::timeout as tokio_timeout;
 
-const SOCKET_TOKEN: Token = Token(0);
-
+/// Saves the socket's read timeout on construction and restores it on drop.
+///
+/// The blocking receive path drives its timeout budget through
+/// `set_read_timeout`, so the caller's original setting must be put back even
+/// if the receive returns early or unwinds.
 pub(super) struct SocketReadTimeoutGuard<'a> {
     socket: &'a UdpSocket,
     previous: Option<Duration>,
@@ -40,159 +33,56 @@ impl Drop for SocketReadTimeoutGuard<'_> {
     }
 }
 
-#[cfg(any(unix, windows))]
-pub(super) struct SocketReadinessWaiter {
-    poll: Poll,
-    events: Events,
-    #[cfg(unix)]
-    raw_fd: RawFd,
-    #[cfg(windows)]
-    raw_socket: RawSocket,
-}
+/// Initial backoff applied when a nonblocking socket reports `WouldBlock`.
+const NONBLOCKING_BACKOFF_START: Duration = Duration::from_micros(50);
+/// Upper bound on the nonblocking backoff, capping added receive latency.
+const NONBLOCKING_BACKOFF_MAX: Duration = Duration::from_millis(1);
 
-#[cfg(not(any(unix, windows)))]
-pub(super) struct SocketReadinessWaiter;
-
-#[cfg(unix)]
-impl SocketReadinessWaiter {
-    pub(super) fn new(socket: &UdpSocket) -> Result<Self> {
-        let poll = Poll::new()?;
-        let raw_fd = socket.as_raw_fd();
-        let mut source = SourceFd(&raw_fd);
-        poll.registry()
-            .register(&mut source, SOCKET_TOKEN, Interest::READABLE)?;
-        Ok(Self {
-            poll,
-            events: Events::with_capacity(4),
-            raw_fd,
-        })
-    }
-
-    fn wait_until_readable(&mut self, timeout: Duration) -> io::Result<bool> {
-        let mut source = SourceFd(&self.raw_fd);
-        self.poll
-            .registry()
-            .reregister(&mut source, SOCKET_TOKEN, Interest::READABLE)?;
-        poll_until_readable(&mut self.poll, &mut self.events, timeout)
-    }
-}
-
-#[cfg(unix)]
-impl Drop for SocketReadinessWaiter {
-    fn drop(&mut self) {
-        let mut source = SourceFd(&self.raw_fd);
-        let _ = self.poll.registry().deregister(&mut source);
-    }
-}
-
-#[cfg(windows)]
-impl SocketReadinessWaiter {
-    pub(super) fn new(socket: &UdpSocket) -> Result<Self> {
-        let poll = Poll::new()?;
-        let raw_socket = socket.as_raw_socket();
-        let mut source = SourceSocket(&raw_socket);
-        poll.registry()
-            .register(&mut source, SOCKET_TOKEN, Interest::READABLE)?;
-        Ok(Self {
-            poll,
-            events: Events::with_capacity(4),
-            raw_socket,
-        })
-    }
-
-    fn wait_until_readable(&mut self, timeout: Duration) -> io::Result<bool> {
-        let mut source = SourceSocket(&self.raw_socket);
-        self.poll
-            .registry()
-            .reregister(&mut source, SOCKET_TOKEN, Interest::READABLE)?;
-        poll_until_readable(&mut self.poll, &mut self.events, timeout)
-    }
-}
-
-#[cfg(windows)]
-impl Drop for SocketReadinessWaiter {
-    fn drop(&mut self) {
-        let mut source = SourceSocket(&self.raw_socket);
-        let _ = self.poll.registry().deregister(&mut source);
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-impl SocketReadinessWaiter {
-    pub(super) fn new(_socket: &UdpSocket) -> Result<Self> {
-        Ok(Self)
-    }
-}
-
-#[cfg(any(unix, windows))]
+/// Receives a single datagram, waiting at most `timeout`.
+///
+/// Callers must hold a [`SocketReadTimeoutGuard`] for the socket: this sets the
+/// read timeout to the remaining budget on each attempt.
+///
+/// A nonblocking socket cannot wait, so `WouldBlock` is retried under a short
+/// capped backoff rather than spinning a core.
 pub(super) fn recv_from_timeout(
     socket: &UdpSocket,
     timeout: Duration,
     buffer: &mut [u8],
-    readiness: &mut SocketReadinessWaiter,
 ) -> Result<Option<(SocketAddr, usize)>> {
     if timeout.is_zero() {
         return Ok(None);
     }
 
     let start = Instant::now();
+    let mut backoff = NONBLOCKING_BACKOFF_START;
     loop {
         let elapsed = start.elapsed();
         if elapsed >= timeout {
             return Ok(None);
         }
-        let remaining = timeout - elapsed;
-        if !readiness.wait_until_readable(remaining)? {
-            return Ok(None);
-        }
+        socket.set_read_timeout(Some(timeout - elapsed))?;
 
         match socket.recv_from(buffer) {
             Ok((len, source)) => return Ok(Some((source, len))),
+            // A signal cut the wait short. The socket was willing to block, so
+            // retry at once; the read timeout still bounds the budget.
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err)
                 if matches!(
                     err.kind(),
-                    io::ErrorKind::WouldBlock
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::Interrupted
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                continue;
-            }
-            Err(err) => return Err(UniUdpError::Io(err)),
-        }
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-pub(super) fn recv_from_timeout(
-    socket: &UdpSocket,
-    timeout: Duration,
-    buffer: &mut [u8],
-    _readiness: &mut SocketReadinessWaiter,
-) -> Result<Option<(SocketAddr, usize)>> {
-    if timeout.is_zero() {
-        return Ok(None);
-    }
-
-    let start = Instant::now();
-    loop {
-        let elapsed = start.elapsed();
-        if elapsed >= timeout {
-            return Ok(None);
-        }
-        let remaining = timeout - elapsed;
-        socket.set_read_timeout(Some(remaining))?;
-
-        match socket.recv_from(buffer) {
-            Ok((len, source)) => return Ok(Some((source, len))),
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::WouldBlock
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::Interrupted
-                ) =>
-            {
+                // A blocking socket spends the whole read timeout inside
+                // `recv_from`, leaving no budget and exiting on the next
+                // iteration. Budget left over means the socket is nonblocking
+                // and returned instantly, so sleep rather than spin.
+                let sleep_for = backoff.min(timeout.saturating_sub(start.elapsed()));
+                if !sleep_for.is_zero() {
+                    std::thread::sleep(sleep_for);
+                    backoff = (backoff * 2).min(NONBLOCKING_BACKOFF_MAX);
+                }
                 continue;
             }
             Err(err) => return Err(UniUdpError::Io(err)),
@@ -223,42 +113,6 @@ pub(super) async fn recv_from_timeout_async(
             Ok(Err(err)) if err.kind() == io::ErrorKind::WouldBlock => continue,
             Ok(Err(err)) => return Err(UniUdpError::Io(err)),
             Err(_) => return Ok(None),
-        }
-    }
-}
-
-fn poll_until_readable(
-    poll: &mut Poll,
-    events: &mut Events,
-    timeout: Duration,
-) -> io::Result<bool> {
-    if timeout.is_zero() {
-        return Ok(false);
-    }
-
-    let start = Instant::now();
-    loop {
-        let elapsed = start.elapsed();
-        if elapsed >= timeout {
-            return Ok(false);
-        }
-        let remaining = timeout - elapsed;
-
-        events.clear();
-        match poll.poll(events, Some(remaining)) {
-            Ok(()) => {
-                if events.is_empty() {
-                    return Ok(false);
-                }
-                if events
-                    .iter()
-                    .any(|event| event.token() == SOCKET_TOKEN && event.is_readable())
-                {
-                    return Ok(true);
-                }
-            }
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(err) => return Err(err),
         }
     }
 }

@@ -31,7 +31,7 @@ UniUDP uses **HMAC-SHA256** with a 32-byte key to authenticate each packet. The 
 
 The `auth_key_id` header field identifies which key was used, enabling key rotation without downtime.
 
-Authentication is verified using constant-time comparison (`subtle` crate) to prevent timing side-channel attacks.
+Authentication is verified in constant time via HMAC's `verify_truncated_left` to prevent timing side-channel attacks.
 
 ### Sender Configuration
 
@@ -219,7 +219,8 @@ High rejection counts in specific categories indicate configuration issues, atta
 
 ### Socket Modes
 
-- **Blocking sockets** (recommended): `Receiver::receive_message` uses `mio` polling on unix and windows to wait for data without mutating socket state. On other platforms it falls back to `set_read_timeout`. The socket's previous read timeout is always saved and restored.
+- **Blocking sockets** (recommended): `Receiver::receive_message` drives its timeout budget with `set_read_timeout`, so each datagram costs a single `recv_from`. The socket's previous read timeout is always saved and restored, including on early return or unwind.
+- **Nonblocking sockets**: supported, but a nonblocking socket ignores the read timeout and cannot wait, so `WouldBlock` is retried under a short capped backoff (50 µs doubling to 1 ms) until the budget is exhausted. This trades a little receive latency for not spinning a core.
 - **Tokio async**: `Receiver::receive_message_async` uses Tokio's async I/O primitives and never mutates socket state.
 
 ### Process Boundaries
