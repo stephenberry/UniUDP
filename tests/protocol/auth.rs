@@ -568,3 +568,44 @@ fn tampered_authenticated_packet_is_rejected() {
     assert!(diagnostics.auth_rejections > 0);
     assert_eq!(diagnostics.packets_accepted, 0);
 }
+
+/// Pins the on-the-wire auth tag to a fixed value.
+///
+/// The HMAC-SHA256 implementation behind `PACKET_FLAG_AUTH_PRESENT` is internal
+/// to this crate, so nothing else in the suite would notice if it changed: every
+/// other auth test encodes and verifies with the same code. A receiver running
+/// an older release, however, would simply reject every packet. This vector was
+/// produced by uniudp 1.2.1 and must not change without a protocol version bump.
+#[test]
+fn auth_tag_matches_the_published_wire_format() {
+    const AUTH_TAG_OFFSET: usize = 68;
+
+    let auth = PacketAuth::new(
+        0x0102_0304,
+        PacketAuthKey::new([
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f,
+        ]),
+    );
+    let header = packet_header(
+        SenderId(0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100),
+        0x1122_3344_5566_7788,
+        0x99aa_bbcc_ddee_ff00,
+        2,
+        5,
+        40,
+        8,
+        8,
+        4,
+        3,
+        pack_fec_field(1, false).unwrap(),
+    );
+    let payload: Vec<u8> = (0_u8..8).collect();
+
+    let packet = encode_packet_with_auth(header, &payload, Some(&auth)).unwrap();
+    let tag = &packet[AUTH_TAG_OFFSET..AUTH_TAG_OFFSET + PACKET_AUTH_TAG_LENGTH];
+    let tag_hex: String = tag.iter().map(|byte| format!("{byte:02x}")).collect();
+
+    assert_eq!(tag_hex, "862cec3cd4a480dc3038506ed20406e3");
+}

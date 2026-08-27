@@ -23,9 +23,8 @@ tokio = ["dep:tokio"]
 [dependencies]
 crc32c = "0.6.8"
 getrandom = "0.4"
-hmac = "0.13"
 reed-solomon-engine = "0.2"
-sha2 = "0.11"
+sha2 = { version = "0.11", default-features = false, features = ["zeroize"] }
 tokio = { version = "1", features = ["net", "time", "rt", "macros"], optional = true }
 zeroize = "1"
 

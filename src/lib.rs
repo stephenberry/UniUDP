@@ -5,6 +5,7 @@ mod checksum;
 mod error;
 pub mod fec;
 mod header_validation;
+mod hmac_sha256;
 pub mod packet;
 mod random;
 pub mod receiver;
