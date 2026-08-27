@@ -11,11 +11,12 @@ env:
 
 jobs:
   test:
-    name: Test (${{ matrix.rust }})
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.rust }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         rust: [stable, nightly]
     steps:
       - uses: actions/checkout@v4
