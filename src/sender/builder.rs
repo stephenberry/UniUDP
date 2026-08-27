@@ -30,7 +30,7 @@ pub struct SenderBuilder {
 impl Default for SenderBuilder {
     fn default() -> Self {
         Self {
-            sender_id: SenderId(rand::random::<u128>()),
+            sender_id: SenderId(crate::random::random_u128()),
             session_nonce_strategy: SessionNonceStrategy::RandomDefault,
             max_tracked_senders: DEFAULT_MAX_TRACKED_SENDERS,
             message_id_start: MessageIdStart::Zero,

@@ -227,7 +227,7 @@ impl Sender {
         let (counter_seed, post_reset_counter_pending) = match message_id_start {
             MessageIdStart::Zero => Self::counter_state_for_first_message_id(0),
             MessageIdStart::Random => {
-                Self::counter_state_for_first_message_id(rand::random::<u64>())
+                Self::counter_state_for_first_message_id(crate::random::random_u64())
             }
             MessageIdStart::Next(next) => Self::counter_state_for_first_message_id(next),
         };
@@ -482,5 +482,5 @@ impl Default for Sender {
 
 pub(super) fn default_session_nonce() -> u64 {
     // Random default avoids nonce reuse under clock rollback/snapshot restore.
-    rand::random::<u64>()
+    crate::random::random_u64()
 }
