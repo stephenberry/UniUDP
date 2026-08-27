@@ -52,6 +52,30 @@ tokio = { version = "1", features = ["macros", "rt", "net"] }
 `tokio` dependency when your application uses `tokio::net::UdpSocket` and
 `#[tokio::main]` (as in the async example below).
 
+## WebAssembly
+
+| Target | Builds | UDP sockets at runtime |
+| --- | --- | --- |
+| `wasm32-unknown-unknown` | yes, with the backend below | none exist — codec only |
+| `wasm32-wasip2` | yes | yes, but the platform rejects socket read timeouts |
+| `wasm32-wasip1` | yes | reported unsupported by the platform |
+
+The `tokio` feature does not build for any wasm target, because Tokio's `net` feature requires `mio`, which has no wasm support. Use default features.
+
+### `wasm32-unknown-unknown`
+
+`uniudp` seeds sender IDs and session nonces from the operating system's entropy source through `getrandom`, which cannot infer a backend for this target on its own. Select the browser backend in your own `Cargo.toml`:
+
+```toml
+[dependencies]
+uniudp = "1"
+getrandom = { version = "0.4", features = ["wasm_js"] }
+```
+
+This crate deliberately does not enable that feature itself: it pulls `wasm-bindgen` into `Cargo.lock` on every target and breaks non-Web wasm builds, so the choice belongs to the final binary.
+
+This target has no sockets. `Sender::send_with_socket` and `Receiver::receive_message` compile but cannot operate. The `packet` and `fec` modules are pure computation and work normally, so encode and parse frames here and carry the bytes over WebTransport, WebSocket, or WebRTC.
+
 ## Quick Start
 
 ### Send and receive a message

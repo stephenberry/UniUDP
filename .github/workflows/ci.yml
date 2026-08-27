@@ -37,6 +37,35 @@ jobs:
       - run: cargo build --all-features
       - run: cargo test --all-features
 
+  wasm:
+    name: wasm (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [wasm32-wasip1, wasm32-wasip2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # Default features only: the tokio feature needs mio, which has no wasm support.
+      # wasm32-unknown-unknown is covered by wasm-consumer below: checking the bare
+      # library cannot work there, because nothing selects a getrandom backend.
+      - run: cargo check --target ${{ matrix.target }}
+
+  # Mirrors how a browser application depends on this crate: getrandom cannot pick
+  # a backend for wasm32-unknown-unknown on its own, so the final binary selects one.
+  wasm-consumer:
+    name: wasm browser consumer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo check --manifest-path ci/wasm-consumer/Cargo.toml --target wasm32-unknown-unknown
+
   clippy:
     name: Clippy (${{ matrix.rust }})
     runs-on: ubuntu-latest

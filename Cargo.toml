@@ -10,6 +10,7 @@ documentation = "https://docs.rs/uniudp"
 readme = "README.md"
 keywords = ["udp", "networking", "transport", "fec", "reliability"]
 categories = ["network-programming"]
+exclude = ["ci"]
 rust-version = "1.96"
 
 [lib]

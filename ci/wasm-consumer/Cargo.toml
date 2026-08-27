@@ -1,0 +1,18 @@
+# Mirrors how a browser application depends on uniudp. `getrandom` cannot infer a
+# backend for wasm32-unknown-unknown, so the final binary selects one; uniudp
+# deliberately does not, since `wasm_js` pulls wasm-bindgen into every target.
+# Checked in so the browser build path is verifiable locally, not only in CI.
+[package]
+name = "wasm-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+uniudp = { path = "../.." }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
+[workspace]
